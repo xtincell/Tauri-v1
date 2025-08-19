@@ -1,0 +1,30 @@
+{
+  "productName": "Factures & Recus",
+  "version": "0.1.0",
+  "identifier": "com.xtincell.facturesrecus.desktop",
+  "build": {
+    "beforeDevCommand": "vite",
+    "beforeBuildCommand": "vite build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Factures & Re\u00e7us",
+        "width": 420,
+        "height": 780,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "msi"
+    ],
+    "icon": []
+  }
+}
