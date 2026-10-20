@@ -35,10 +35,11 @@ Pour la recette dans un navigateur, `npm run dev`. Contrôles reproductibles :
 
 ## Construire l'installable
 ```bash
-npm run tauri:build
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+npm run tauri:build -- --target universal-apple-darwin --bundles app -- --locked
 ```
-- macOS: `src-tauri/target/release/bundle/macos/Factures & Recus.app`
-- Windows: `src-tauri/target/release/bundle/msi/factures-recus_*_x64_en-US.msi`
+- macOS: `src-tauri/target/universal-apple-darwin/release/bundle/macos/Factures & Recus.app`
+- Windows : la commande `npm run tauri:build -- --bundles msi -- --locked` et l’installateur MSI restent à recevoir séparément.
 
 > Les données restent locales (LocalStorage). Aucune connexion réseau n'est requise.
 
@@ -72,7 +73,7 @@ des réceptions distinctes.
 ## Périmètre de vérification
 
 La CI contrôle les données, TypeScript et le build web. Le job macOS compile
-séparément l'application Tauri et conserve un ZIP de l'application avec ses
+séparément l'application Tauri universelle Intel/Apple Silicon, avec le lock Rust reçu, et conserve un ZIP de l'application avec ses
 permissions. Un build ne prouve pas l'ouverture d'une application sur une machine
 utilisateur. La signature/notarisation et la recette Windows restent à recevoir ;
 aucun installateur Windows n'est qualifié par le job macOS.

@@ -35,13 +35,14 @@ jobs:
           cache: npm
           cache-dependency-path: factures-recus-tauri/package-lock.json
       - run: npm ci
-      - run: npm run tauri:build -- --bundles app
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: npm run tauri:build -- --target universal-apple-darwin --bundles app -- --locked
       - name: Package the app with executable permissions
-        run: ditto -c -k --sequesterRsrc --keepParent "src-tauri/target/release/bundle/macos/Factures & Recus.app" factures-recus-macos.zip
+        run: ditto -c -k --sequesterRsrc --keepParent "src-tauri/target/universal-apple-darwin/release/bundle/macos/Factures & Recus.app" factures-recus-macos-universal.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: factures-recus-macos
-          path: factures-recus-tauri/factures-recus-macos.zip
+          name: factures-recus-macos-universal
+          path: factures-recus-tauri/factures-recus-macos-universal.zip
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
