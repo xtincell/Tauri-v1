@@ -1,6 +1,7 @@
 name: Treasury checks
 on:
   push:
+    branches: [main]
   pull_request:
 permissions:
   contents: read
@@ -41,4 +42,10 @@ jobs:
         with:
           name: factures-recus-macos
           path: factures-recus-tauri/factures-recus-macos.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: factures-recus-rust-lock
+          path: factures-recus-tauri/src-tauri/Cargo.lock
           if-no-files-found: error
