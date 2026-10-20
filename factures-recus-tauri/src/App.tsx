@@ -1,37 +1,20 @@
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { calculateBalances, calculateSummary, DEFAULT_CATEGORIES, DEFAULT_WALLETS, parseAmount, parseSMSDraft, readLedger,
+  recordTransactions, transactionsCSV, validateLedger, writeLedger, type Ledger, type TxType } from "./ledger";
 
 const CURRENCY = "XAF";
 const nf = new Intl.NumberFormat("fr-FR", { style: "currency", currency: CURRENCY, maximumFractionDigits: 0 });
-type TxType = "expense" | "income" | "transfer";
 
 function formatMoney(v:number){ if (!isFinite(v as any)) return "—"; return nf.format(Math.round(v)); }
-function parseAmount(input:string){ if(!input) return 0; const clean = input.replace(/[^0-9]/g, ""); return parseInt(clean || "0", 10); }
-function ymd(d: Date | string | number){ const dd = new Date(d); return dd.toISOString().slice(0,10); }
+function ymd(d: Date){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 function iso(d: Date | string | number){ const dd = new Date(d); return dd.toISOString(); }
-function todayStart(){ const d = new Date(); d.setHours(0,0,0,0); return d; }
-function weekStart(){ const d = new Date(); const day = (d.getDay() + 6) % 7; d.setDate(d.getDate() - day); d.setHours(0,0,0,0); return d; }
-function monthStart(){ const d = new Date(); d.setDate(1); d.setHours(0,0,0,0); return d; }
 function uid(){ return `${Date.now()}_${Math.random().toString(36).slice(2,8)}`; }
 
-const DEFAULT_CATEGORIES = [
-  { id: "food", name: "Nourriture" },
-  { id: "transport", name: "Transport" },
-  { id: "housing", name: "Logement" },
-  { id: "health", name: "Santé" },
-  { id: "pro", name: "Pro" },
-  { id: "leisure", name: "Loisirs" },
-  { id: "other", name: "Divers" },
-];
-const DEFAULT_WALLETS = [
-  { id: "cash", name: "Cash", type: "cash", initial: 0 },
-  { id: "om", name: "Orange Money", type: "om", initial: 0 },
-  { id: "momo", name: "MTN MoMo", type: "momo", initial: 0 },
-];
-
-const STORAGE_KEY = "fr-app-v1";
-function loadState(){ try{ const raw = localStorage.getItem(STORAGE_KEY); if(!raw) return null; return JSON.parse(raw);}catch{return null;} }
-function saveState(state:any){ try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch{} }
+const browserStorage = {
+  getItem: (key:string) => window.localStorage.getItem(key),
+  setItem: (key:string, value:string) => window.localStorage.setItem(key, value),
+};
 
 const Pill: React.FC<{children:React.ReactNode, tone?:"muted"|"ok"|"warn"|"danger"}> = ({children, tone="muted"}) => (
   <span className={
@@ -60,15 +43,34 @@ const Section: React.FC<{title:string, right?:React.ReactNode, children:React.Re
 
 export default function App(){
   const [tab, setTab] = useState<"capture"|"inbox"|"history"|"dashboard"|"export"|"settings">("capture");
-  const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
-  const [wallets, setWallets] = useState(DEFAULT_WALLETS);
-  const [transactions, setTransactions] = useState<any[]>([]);
-  const [receiptsInbox, setReceiptsInbox] = useState<any[]>([]);
+  const [boot] = useState(() => readLedger(browserStorage));
+  const [ledger, setLedger] = useState(boot.ledger);
+  const ledgerRef = useRef(boot.ledger);
+  const [readError, setReadError] = useState(boot.error);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const { categories, wallets, transactions, receiptsInbox } = ledger;
+  const [receiptId, setReceiptId] = useState<string | null>(null);
+  const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
+  function commit(next: Ledger | ((current:Ledger)=>Ledger), recovery = false): boolean {
+    if (readError && !recovery) { setSaveError(readError); return false; }
+    try {
+      const received = writeLedger(browserStorage, typeof next === "function" ? next(ledgerRef.current) : next);
+      ledgerRef.current = received; setLedger(received); setSaveError(null);
+      if (recovery) setReadError(null);
+      return true;
+    } catch (error) {
+      setSaveError(error instanceof DOMException ? "Enregistrement impossible : stockage local indisponible ou plein. L’opération n’est pas enregistrée ; le formulaire et les données précédentes sont conservés." :
+        error instanceof Error ? error.message : "Enregistrement impossible. Les données précédentes sont conservées.");
+      return false;
+    }
+  }
+  function setCategories(next:any) { return commit(current => ({ ...current, categories: next })); }
+  function setWallets(next:any) { return commit(current => ({ ...current, wallets: next })); }
   const [type, setType] = useState<TxType>("expense");
   const [amount, setAmount] = useState<string>("");
-  const [category, setCategory] = useState<string>(DEFAULT_CATEGORIES[0].id);
-  const [walletSrc, setWalletSrc] = useState<string>(DEFAULT_WALLETS[0].id);
-  const [walletDst, setWalletDst] = useState<string>(DEFAULT_WALLETS[1].id);
+  const [category, setCategory] = useState<string>(boot.ledger.categories[0].id);
+  const [walletSrc, setWalletSrc] = useState<string>(boot.ledger.wallets[0].id);
+  const [walletDst, setWalletDst] = useState<string>(boot.ledger.wallets[1]?.id ?? boot.ledger.wallets[0].id);
   const [note, setNote] = useState("");
   const [date, setDate] = useState(ymd(new Date()));
   const [time, setTime] = useState<string>(() => new Date().toTimeString().slice(0,5));
@@ -77,31 +79,24 @@ export default function App(){
   const [smsDraft, setSmsDraft] = useState<any | null>(null);
 
   useEffect(()=>{
-    const saved = loadState();
-    if(saved){
-      setCategories(saved.categories || DEFAULT_CATEGORIES);
-      setWallets(saved.wallets || DEFAULT_WALLETS);
-      setTransactions(saved.transactions || []);
-      setReceiptsInbox(saved.receiptsInbox || []);
-    }
-  },[]);
-  useEffect(()=>{
-    saveState({ categories, wallets, transactions, receiptsInbox });
-  }, [categories, wallets, transactions, receiptsInbox]);
+    if (!categories.some(c => c.id === category)) setCategory(categories[0].id);
+    if (!wallets.some(w => w.id === walletSrc)) setWalletSrc(wallets[0].id);
+    if (!wallets.some(w => w.id === walletDst)) setWalletDst(wallets[1]?.id ?? wallets[0].id);
+  }, [categories, wallets, category, walletSrc, walletDst]);
 
-  function addTransaction(tx:any){ setTransactions(prev => [{...tx, id: uid()}, ...prev]); }
-  function onSubmitCapture(e:any){
+  function onSubmitCapture(e:React.FormEvent){
     e.preventDefault();
     const amt = parseAmount(amount);
-    if(!amt || amt <= 0){ alert("Montant invalide"); return; }
     const dateTime = new Date(`${date}T${time}:00`);
-    if(type === "transfer"){
-      if(walletSrc === walletDst){ alert("Choisis des portefeuilles différents"); return; }
-      addTransaction({ type, amount: amt, date: iso(dateTime), category: "transfer", walletSrc, walletDst, note: note.trim(), source:"manual", attachments: attach?[attach]:[] });
-    } else {
-      addTransaction({ type, amount: amt, date: iso(dateTime), category, wallet: walletSrc, note: note.trim(), source:"manual", attachments: attach?[attach]:[] });
+    if (!Number.isSafeInteger(amt) || amt <= 0) { setSaveError("Montant invalide : saisis un entier XAF strictement positif."); return; }
+    if (!Number.isFinite(dateTime.getTime()) || ymd(dateTime) !== date || dateTime.toTimeString().slice(0,5) !== time) {
+      setSaveError("Date ou heure invalide."); return;
     }
-    setAmount(""); setNote(""); setAttach(null);
+    const tx = { id: uid(), type, amount: amt, date: iso(dateTime), note: note.trim(), source: "manual", attachments: attach ? [attach] : [],
+      ...(type === "transfer" ? { category: "transfer", walletSrc, walletDst } : { category, wallet: walletSrc }) };
+    if (commit(current => recordTransactions(current, [tx], receiptId))) {
+      setAmount(""); setNote(""); setAttach(null); setReceiptId(null);
+    }
   }
   async function onPickFileToDataURL(file: File){
     return await new Promise<string>((resolve, reject) => {
@@ -113,74 +108,40 @@ export default function App(){
   }
 
   function parseSMS(){
-    const t = smsText.trim();
-    if(!t){ setSmsDraft(null); return; }
-    const w = /orange|om/i.test(t) ? "om" : /mtn|momo/i.test(t) ? "momo" : wallets[0]?.id;
-    const amountMatch = t.match(/([0-9]{1,3}(?:[ .][0-9]{3})+|\\d{3,})\\s*(?:XAF|F\\s*CFA|FCFA)?/i);
-    const m = amountMatch ? parseAmount(amountMatch[1]) : 0;
-    const feeMatch = t.match(/frais[^0-9]*([0-9]{1,3}(?:[ .][0-9]{3})+|\\d{2,})/i);
-    const fees = feeMatch ? parseAmount(feeMatch[1]) : 0;
-    let ttype:TxType = "expense";
-    if(/reçu|credit|crédit|vous avez reçu/i.test(t)) ttype = "income";
-    if(/transfert|transféré|envoyé|paiement|payé|débit/i.test(t)) ttype = "expense";
-    let who = "";
-    const whoMatch = t.match(/à\\s+([A-Za-z0-9_\\-.' ]{3,30})|de\\s+([A-Za-z0-9_\\-.' ]{3,30})/i);
-    if(whoMatch) who = (whoMatch[1]||whoMatch[2]||"").trim();
-    setSmsDraft({ type: ttype, amount: m, fees, wallet: w, category: ttype==="income"? "pro":"other", note: who? `SMS: ${who}` : "SMS importé", date: iso(new Date()) });
+    try { setSmsDraft(parseSMSDraft(smsText, ledgerRef.current)); setSaveError(null); }
+    catch (error) { setSmsDraft(null); setSaveError((error as Error).message); }
   }
   function applySMSDraft(){
-    if(!smsDraft) return;
-    addTransaction({ type: smsDraft.type, amount: smsDraft.amount, date: smsDraft.date, category: smsDraft.category, wallet: smsDraft.wallet, note: smsDraft.note, source:"sms" });
-    if(smsDraft.fees){ addTransaction({ type: "expense", amount: smsDraft.fees, date: smsDraft.date, category: "other", wallet: smsDraft.wallet, note: "Frais (SMS)", source:"sms" }); }
-    setSmsText(""); setSmsDraft(null);
+    if (!smsDraft) return;
+    const { fees, ...draft } = smsDraft;
+    const additions = [{ ...draft, id: uid(), source: "sms" }];
+    if (fees) additions.push({ id: uid(), type: "expense", amount: fees, date: draft.date,
+      category: categories.find(c => c.id === "other")?.id ?? categories[0].id,
+      wallet: draft.wallet, note: "Frais (SMS)", source: "sms" });
+    if (commit(current => recordTransactions(current, additions))) { setSmsText(""); setSmsDraft(null); }
   }
   async function onAddReceipts(files: FileList | null){
-    if(!files || !files.length) return;
-    const items: any[] = [];
-    for(const f of Array.from(files)){
-      const dataUrl = await onPickFileToDataURL(f);
-      items.push({ id: uid(), dataUrl, createdAt: iso(new Date())});
-    }
-    setReceiptsInbox(prev => [...items, ...prev]);
+    if (!files?.length) return;
+    try {
+      const items = [];
+      for (const f of Array.from(files)) items.push({ id: uid(), dataUrl: await onPickFileToDataURL(f), createdAt: iso(new Date()) });
+      commit(current => ({ ...current, receiptsInbox: [...items, ...current.receiptsInbox] }));
+    } catch { setSaveError("Impossible de lire ces photos. Aucun reçu n’a été ajouté."); }
   }
-  function removeReceipt(id:string){ setReceiptsInbox(prev => prev.filter(r => r.id !== id)); }
-  function assimilateReceipt(r:any){
-    setAttach(r.dataUrl);
+  function removeReceipt(id:string){
+    if (commit(current => ({ ...current, receiptsInbox: current.receiptsInbox.filter(r => r.id !== id) })) && receiptId === id) {
+      setAttach(null); setReceiptId(null);
+    }
+  }
+  function assimilateReceipt(r:Ledger["receiptsInbox"][number]){
+    setAttach(r.dataUrl); setReceiptId(r.id);
     setType("expense");
-    setCategory("other");
-    setWalletSrc("cash");
+    setCategory(categories.find(c => c.id === "other")?.id ?? categories[0].id);
+    setWalletSrc(wallets.find(w => w.type === "cash")?.id ?? wallets[0].id);
     setTab("capture");
-    removeReceipt(r.id);
   }
 
-  const summary = useMemo(()=>{
-    const t0 = todayStart(), w0 = weekStart(), m0 = monthStart();
-    const base = { income:0, expense:0 }; const acc:any = { today:{...base}, week:{...base}, month:{...base} };
-    for(const tx of transactions){
-      if(tx.type === "transfer") continue;
-      const when = new Date(tx.date);
-      const bucket = (b:any) => { if(tx.type === "income") b.income += tx.amount; else if(tx.type === "expense") b.expense += tx.amount; };
-      if(when >= t0) bucket(acc.today);
-      if(when >= w0) bucket(acc.week);
-      if(when >= m0) bucket(acc.month);
-    }
-    const expByCat = new Map<string, number>();
-    for(const tx of transactions){
-      if(tx.type !== "expense") continue;
-      const when = new Date(tx.date);
-      if(when < m0) continue;
-      const key = tx.category || "other";
-      expByCat.set(key, (expByCat.get(key) || 0) + tx.amount);
-    }
-    const topCats = Array.from(expByCat.entries()).sort((a,b)=>b[1]-a[1]).slice(0,5);
-    const daysSet = new Set(transactions.map(tx => new Date(tx.date).toDateString()));
-    let streak = 0;
-    for(let i=0; i<365; i++){ const d = new Date(); d.setDate(d.getDate()-i); d.setHours(0,0,0,0); if(daysSet.has(d.toDateString())) streak++; else break; }
-    const last30 = new Set<string>(); for(let i=0;i<30;i++){ const d = new Date(); d.setDate(d.getDate()-i); last30.add(d.toDateString()); }
-    const covered = new Set(transactions.map(tx => new Date(tx.date).toDateString()).filter(s => last30.has(s)));
-    const clarityScore = Math.round((covered.size/30)*100);
-    return { acc, topCats, streak, clarityScore };
-  }, [transactions]);
+  const summary = useMemo(() => calculateSummary(transactions), [transactions]);
 
   const [q, setQ] = useState("");
   const [fltType, setFltType] = useState<"all"|TxType>("all");
@@ -205,15 +166,7 @@ export default function App(){
     });
   }, [transactions, fltType, fltCat, fltWal, dateFrom, dateTo, q]);
 
-  const walletBalances = useMemo(()=>{
-    const map = new Map<string, number>(); for(const w of wallets){ map.set(w.id, w.initial || 0); }
-    for(const tx of transactions){
-      if(tx.type === "income") map.set(tx.wallet, (map.get(tx.wallet)||0) + tx.amount);
-      if(tx.type === "expense") map.set(tx.wallet, (map.get(tx.wallet)||0) - tx.amount);
-      if(tx.type === "transfer"){ map.set(tx.walletSrc, (map.get(tx.walletSrc)||0) - tx.amount); map.set(tx.walletDst, (map.get(tx.walletDst)||0) + tx.amount); }
-    }
-    return map;
-  }, [wallets, transactions]);
+  const walletBalances = useMemo(() => calculateBalances(ledger), [ledger]);
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900">
@@ -245,6 +198,10 @@ export default function App(){
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-6">
+        {(readError || saveError) && <div role="alert" className="mb-4 rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-900">{saveError || readError}</div>}
+        {receiptPreview && <Section title="Justificatif" right={<button onClick={()=>setReceiptPreview(null)} className="px-3 py-1.5 rounded-lg border">Fermer le justificatif</button>}>
+          <img src={receiptPreview} alt="Justificatif de l’opération" className="max-h-[70vh] max-w-full object-contain" />
+        </Section>}
         {/* Capture */}
         {tab === "capture" && (
           <>
@@ -302,16 +259,21 @@ export default function App(){
                     <Field label="Photo du reçu (facultatif)">
                       <input type="file" accept="image/*" onChange={async e=>{
                         const f = e.target.files?.[0];
-                        if(f){ const d = await onPickFileToDataURL(f); setAttach(d); }
+                        if(f){
+                          try { const d = await onPickFileToDataURL(f); setAttach(d); setReceiptId(null); }
+                          catch { setSaveError("Impossible de lire cette photo."); }
+                        }
                       }} className="block" />
                       {attach && (
-                        <img src={attach} alt="reçu" className="mt-2 max-h-32 rounded-lg border" />
+                        <><img src={attach} alt="reçu" className="mt-2 max-h-32 rounded-lg border" />
+                        <button type="button" className="text-sm underline" onClick={()=>{ setAttach(null); setReceiptId(null); }}>Détacher le reçu</button>
+                        {receiptId && <span className="text-xs text-gray-500">Le reçu reste dans la boîte jusqu’à l’enregistrement.</span>}</>
                       )}
                     </Field>
 
                     <div className="md:col-span-2 flex items-center gap-3 pt-2">
                       <button className="px-4 py-2 rounded-xl bg-orange-600 text-white">Enregistrer</button>
-                      <span className="text-sm text-gray-500">Astuce : tape juste « 2 000 taxi » dans montant & note, puis Valider.</span>
+                      <span className="text-sm text-gray-500">Montant entier en XAF, par exemple 2 000. La note se saisit séparément.</span>
                     </div>
                   </form>
                 </Section>
@@ -415,8 +377,8 @@ export default function App(){
         {tab === "history" && (
           <>
             <Section title="Filtres">
-              <div className="grid md:grid-cols-6 gap-3">
-                <input placeholder="Rechercher…" value={q} onChange={e=>setQ(e.target.value)} className="border rounded-xl px-3 py-2 md:col-span-2" />
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                <input placeholder="Rechercher…" value={q} onChange={e=>setQ(e.target.value)} className="border rounded-xl px-3 py-2" />
                 <select value={fltType} onChange={e=>setFltType(e.target.value as any)} className="border rounded-xl px-3 py-2">
                   <option value="all">Type: Tous</option>
                   <option value="expense">Dépenses</option>
@@ -432,8 +394,8 @@ export default function App(){
                   {wallets.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
                 </select>
                 <div className="flex gap-2">
-                  <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)} className="border rounded-xl px-3 py-2 flex-1"/>
-                  <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)} className="border rounded-xl px-3 py-2 flex-1"/>
+                  <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)} className="border rounded-xl px-3 py-2 flex-1 min-w-0"/>
+                  <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)} className="border rounded-xl px-3 py-2 flex-1 min-w-0"/>
                 </div>
               </div>
             </Section>
@@ -477,9 +439,9 @@ export default function App(){
                           <td className="text-right">
                             <div className="flex items-center gap-2 justify-end">
                               {Array.isArray(tx.attachments) && tx.attachments[0] && (
-                                <button onClick={()=> window.open(tx.attachments[0], '_blank')} className="px-2 py-1 border rounded-lg">Reçu</button>
+                                <button onClick={()=>setReceiptPreview(tx.attachments![0])} className="px-2 py-1 border rounded-lg">Reçu</button>
                               )}
-                              <button onClick={()=> setTransactions(prev => prev.filter(p => p.id !== tx.id))} className="px-2 py-1 border rounded-lg">Suppr.</button>
+                              <button onClick={()=> commit(current => ({ ...current, transactions: current.transactions.filter(p => p.id !== tx.id) }))} className="px-2 py-1 border rounded-lg">Suppr.</button>
                             </div>
                           </td>
                         </tr>
@@ -560,35 +522,29 @@ export default function App(){
             <Section title="Exporter & Sauvegarder">
               <div className="flex flex-wrap gap-3">
                 <button onClick={()=>{
-                  const headers = ["id","type","amount","date","category","wallet","walletSrc","walletDst","note","source"];
-                  const lines = [headers.join(",")];
-                  for(const r of transactions){
-                    const obj:any = {}; headers.forEach(h => obj[h] = r[h] ?? "");
-                    lines.push(headers.map(h => JSON.stringify(obj[h])).join(","));
-                  }
-                  const content = lines.join("\\n");
+                  const content = transactionsCSV(transactions);
                   const blob = new Blob([content], {type: "text/csv;charset=utf-8;"});
                   const a = document.createElement("a");
                   a.href = URL.createObjectURL(blob); a.download = `transactions_${new Date().toISOString().slice(0,10)}.csv`; a.click();
                   setTimeout(()=> URL.revokeObjectURL(a.href), 5000);
-                }} className="px-4 py-2 rounded-xl bg-orange-600 text-white">Télécharger CSV</button>
+                }} disabled={!!readError} className="px-4 py-2 rounded-xl bg-orange-600 text-white disabled:opacity-50">Télécharger CSV</button>
                 <button onClick={()=>{
-                  const content = JSON.stringify({categories, wallets, transactions, receiptsInbox}, null, 2);
+                  const content = JSON.stringify(ledger, null, 2);
                   const blob = new Blob([content], {type: "application/json"});
                   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `backup_${new Date().toISOString().slice(0,10)}.json`; a.click();
                   setTimeout(()=> URL.revokeObjectURL(a.href), 5000);
-                }} className="px-4 py-2 rounded-xl border">Sauvegarde JSON</button>
+                }} disabled={!!readError} className="px-4 py-2 rounded-xl border disabled:opacity-50">Sauvegarde JSON</button>
                 <label className="px-4 py-2 rounded-xl border cursor-pointer">Restaurer JSON<input type="file" className="hidden" accept="application/json" onChange={(evt:any)=>{
                   const file = evt.target.files?.[0]; if(!file) return; const reader = new FileReader();
                   reader.onload = () => {
-                    try{ const data = JSON.parse(String(reader.result));
-                      if(data.categories) setCategories(data.categories);
-                      if(data.wallets) setWallets(data.wallets);
-                      if(data.transactions) setTransactions(data.transactions);
-                      if(data.receiptsInbox) setReceiptsInbox(data.receiptsInbox);
-                      alert("Données importées ✓");
-                    }catch(e){ alert("Fichier invalide"); }
+                    try {
+                      const data = validateLedger(JSON.parse(String(reader.result)));
+                      if (!confirm("Remplacer toutes les données locales par cette sauvegarde ?")) return;
+                      if (commit(data, true)) { setAttach(null); setReceiptId(null); setSmsDraft(null); alert("Sauvegarde restaurée et enregistrée ✓"); }
+                    } catch (error) { setSaveError(`Restauration refusée. ${(error as Error).message} Les données précédentes sont conservées.`); }
+                    finally { evt.target.value = ""; }
                   };
+                  reader.onerror = () => setSaveError("Impossible de lire ce fichier. Les données précédentes sont conservées.");
                   reader.readAsText(file);
                 }} /></label>
               </div>
@@ -609,7 +565,9 @@ export default function App(){
             <Section title="Danger zone">
               <button onClick={()=>{
                 if(confirm("Supprimer toutes les données locales ?")){
-                  setTransactions([]); setReceiptsInbox([]); setCategories(DEFAULT_CATEGORIES); setWallets(DEFAULT_WALLETS);
+                  if (commit({ categories: DEFAULT_CATEGORIES, wallets: DEFAULT_WALLETS, transactions: [], receiptsInbox: [] })) {
+                    setAttach(null); setReceiptId(null); setSmsDraft(null);
+                  }
                 }
               }} className="px-4 py-2 rounded-xl bg-red-600 text-white">Réinitialiser</button>
             </Section>
@@ -622,7 +580,7 @@ export default function App(){
   );
 }
 
-function CategoryManager({categories, setCategories}:{categories:any[], setCategories:(v:any)=>void}){
+function CategoryManager({categories, setCategories}:{categories:any[], setCategories:(v:any)=>boolean}){
   const [name, setName] = useState("");
   return (
     <div className="space-y-4">
@@ -630,9 +588,10 @@ function CategoryManager({categories, setCategories}:{categories:any[], setCateg
         <input className="border rounded-xl px-3 py-2" placeholder="Nouvelle catégorie" value={name} onChange={e=>setName(e.target.value)} />
         <button className="px-3 py-2 rounded-xl bg-orange-600 text-white" onClick={()=>{
           const n = name.trim(); if(!n) return;
-          const id = n.toLowerCase().replace(/[^a-z0-9]+/g,'-');
+          const id = n.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+          if(!id) { alert("Nom invalide"); return; }
           if(categories.some((c:any)=> c.id===id)) { alert("Existe déjà"); return; }
-          setCategories([...categories, {id, name:n}]); setName("");
+          if (setCategories([...categories, {id, name:n}])) setName("");
         }}>Ajouter</button>
       </div>
       <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2">
@@ -649,7 +608,7 @@ function CategoryManager({categories, setCategories}:{categories:any[], setCateg
   );
 }
 
-function WalletManager({wallets, setWallets, balances}:{wallets:any[], setWallets:(v:any)=>void, balances: Map<string, number>}){
+function WalletManager({wallets, setWallets, balances}:{wallets:any[], setWallets:(v:any)=>boolean, balances: Map<string, number>}){
   const [name, setName] = useState("");
   const [type, setType] = useState("custom");
   const [initial, setInitial] = useState<string>("0");
@@ -667,10 +626,12 @@ function WalletManager({wallets, setWallets, balances}:{wallets:any[], setWallet
         <input className="border rounded-xl px-3 py-2" placeholder="Solde initial" value={initial} onChange={e=>setInitial(e.target.value)} />
         <button className="px-3 py-2 rounded-xl bg-orange-600 text-white" onClick={()=>{
           const n = name.trim(); if(!n) return;
-          const id = n.toLowerCase().replace(/[^a-z0-9]+/g,'-');
+          const id = n.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+          if(!id) { alert("Nom invalide"); return; }
           if(wallets.some((w:any)=> w.id===id)) { alert("Existe déjà"); return; }
-          setWallets([...wallets, {id, name:n, type, initial: parseAmount(initial)}]);
-          setName(""); setType("custom"); setInitial("0");
+          if (setWallets([...wallets, {id, name:n, type, initial: parseAmount(initial)}])) {
+            setName(""); setType("custom"); setInitial("0");
+          }
         }}>Ajouter</button>
       </div>
       <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2">
