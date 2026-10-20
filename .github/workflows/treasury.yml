@@ -1,0 +1,52 @@
+name: Treasury checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: factures-recus-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: factures-recus-tauri/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+  desktop-macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: factures-recus-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: factures-recus-tauri/package-lock.json
+      - run: npm ci
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: npm run tauri:build -- --target universal-apple-darwin --bundles app -- --locked
+      - name: Package the app with executable permissions
+        run: ditto -c -k --sequesterRsrc --keepParent "src-tauri/target/universal-apple-darwin/release/bundle/macos/Factures & Recus.app" factures-recus-macos-universal.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: factures-recus-macos-universal
+          path: factures-recus-tauri/factures-recus-macos-universal.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: factures-recus-rust-lock
+          path: factures-recus-tauri/src-tauri/Cargo.lock
+          if-no-files-found: error

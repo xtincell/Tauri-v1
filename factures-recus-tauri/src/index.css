@@ -4,3 +4,7 @@
 @tailwind utilities;
 
 body { @apply bg-gray-50 text-gray-900; }
+
+/* Native 420px window and desktop grids must allow their controls to shrink. */
+input, select, textarea { min-width: 0; max-width: 100%; }
+main .grid > * { min-width: 0; }
